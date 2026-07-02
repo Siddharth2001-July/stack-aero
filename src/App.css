@@ -1,0 +1,101 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.app__header {
+  padding: 1rem 1.5rem;
+  background: #101828;
+  color: white;
+}
+
+.app__header h1 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.app__subtitle {
+  margin: 0.25rem 0 0;
+  font-size: 0.85rem;
+  color: #cbd2e1;
+}
+
+.app__subtitle code {
+  color: #9ec5fe;
+}
+
+.app__body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.app__sidebar {
+  width: 280px;
+  flex-shrink: 0;
+  padding: 1.25rem;
+  background: white;
+  border-right: 1px solid #e4e7ec;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.app__sidebar h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.app__meta {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  color: #667085;
+}
+
+.app__sidebar button {
+  padding: 0.6rem 0.9rem;
+  border: none;
+  border-radius: 6px;
+  background: #006be7;
+  color: white;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.app__sidebar button:disabled {
+  background: #98c3ec;
+  cursor: not-allowed;
+}
+
+.app__sidebar button:not(:disabled):hover {
+  background: #0058c2;
+}
+
+.app__status {
+  font-size: 0.8rem;
+  color: #475467;
+}
+
+.app__error {
+  font-size: 0.8rem;
+  color: #b42318;
+  white-space: pre-wrap;
+}
+
+.app__viewer {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+
+.app__placeholder {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #98a2b3;
+  font-size: 0.95rem;
+  padding: 2rem;
+  text-align: center;
+}
