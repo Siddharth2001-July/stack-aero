@@ -1,417 +1,427 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from zipfile import ZipFile, ZIP_DEFLATED
-from xml.etree import ElementTree as ET
+from zipfile import ZIP_DEFLATED, ZipFile
 import json
-import shutil
+from xml.etree import ElementTree as ET
 
-SRC_DOCX = Path('assets/stackaero-quote-studiojazzy.docx')
-SRC_DATA = Path('assets/nutrient-quote-original-adapted/stackaero-quote-data.json')
-OUT_DIR = Path('assets/nutrient-quote-original-adapted')
-OUT_DOCX = OUT_DIR / 'stackaero-quote-template.docx'
-OUT_JSON = OUT_DIR / 'stackaero-quote-data.json'
+SRC_DOCX = Path("assets/stackaero-quote-studiojazzy.docx")
+SRC_DATA = Path("assets/stackaero-quotejson-sample.json")
+OUT_DIR = Path("assets/nutrient-quote-original-adapted")
+OUT_DOCX = OUT_DIR / "stackaero-quote-template.docx"
+OUT_JSON = OUT_DIR / "stackaero-quote-data.json"
 
-W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-XML = 'http://www.w3.org/XML/1998/namespace'
+MONTHS = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+]
 
-ET.register_namespace('w', W)
+W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+XML = "http://www.w3.org/XML/1998/namespace"
+
+ET.register_namespace("w", W)
+
 
 def qn(ns: str, tag: str) -> str:
-    return f'{{{ns}}}{tag}'
-
-W_P = qn(W, 'p')
-W_R = qn(W, 'r')
-W_T = qn(W, 't')
-W_BR = qn(W, 'br')
-W_BODY = qn(W, 'body')
-W_PPR = qn(W, 'pPr')
-W_PAGE_BREAK_BEFORE = qn(W, 'pageBreakBefore')
-W_RPR = qn(W, 'rPr')
-W_DRAWING = qn(W, 'drawing')
+    return f"{{{ns}}}{tag}"
 
 
-def para_text(p: ET.Element) -> str:
-    # Only read text from runs that are direct children of this paragraph.
-    # Outer paragraphs can contain anchored drawings with nested text-box
-    # paragraphs; including those nested texts causes us to delete the drawing.
+W_P = qn(W, "p")
+W_R = qn(W, "r")
+W_T = qn(W, "t")
+W_BODY = qn(W, "body")
+W_PPR = qn(W, "pPr")
+W_RPR = qn(W, "rPr")
+W_PAGE_BREAK_BEFORE = qn(W, "pageBreakBefore")
+W_DRAWING = qn(W, "drawing")
+
+
+def para_text(paragraph: ET.Element) -> str:
     texts: list[str] = []
-    for run in p.findall(f'./{W_R}'):
-        for text_node in run.findall(f'./{W_T}'):
-            texts.append(text_node.text or '')
-    return ''.join(texts)
+    for run in paragraph.findall(f"./{W_R}"):
+        for text_node in run.findall(f"./{W_T}"):
+            texts.append(text_node.text or "")
+    return "".join(texts)
 
 
-def element_text(el: ET.Element) -> str:
-    return ''.join(text_node.text or '' for text_node in el.iter(W_T))
-
-
-def first_rpr(p: ET.Element) -> ET.Element | None:
-    for r in p.findall(f'./{W_R}'):
-        rpr = r.find(f'./{W_RPR}')
+def first_rpr(paragraph: ET.Element) -> ET.Element | None:
+    for run in paragraph.findall(f"./{W_R}"):
+        rpr = run.find(f"./{W_RPR}")
         if rpr is not None:
             return deepcopy(rpr)
     return None
 
 
-def set_para_text(p: ET.Element, text: str, style_source: ET.Element | None = None) -> None:
-    ppr = p.find(f'./{W_PPR}')
+def set_para_text(paragraph: ET.Element, text: str) -> None:
+    ppr = paragraph.find(f"./{W_PPR}")
     ppr_copy = deepcopy(ppr) if ppr is not None else None
-    rpr_copy = first_rpr(style_source or p)
-    p.clear()
+    rpr_copy = first_rpr(paragraph)
+    paragraph.clear()
     if ppr_copy is not None:
-        p.append(ppr_copy)
-    r = ET.SubElement(p, W_R)
+        paragraph.append(ppr_copy)
+    run = ET.SubElement(paragraph, W_R)
     if rpr_copy is not None:
-        r.append(rpr_copy)
-    t = ET.SubElement(r, W_T)
-    if text.startswith(' ') or text.endswith(' ') or '  ' in text:
-        t.set(qn(XML, 'space'), 'preserve')
-    t.text = text
+        run.append(rpr_copy)
+    text_node = ET.SubElement(run, W_T)
+    if text.startswith(" ") or text.endswith(" ") or "  " in text:
+        text_node.set(qn(XML, "space"), "preserve")
+    text_node.text = text
 
 
-def remove_element(parent_map: dict[ET.Element, ET.Element], el: ET.Element) -> None:
-    parent = parent_map.get(el)
+def parent_map(root: ET.Element) -> dict[ET.Element, ET.Element]:
+    return {child: parent for parent in root.iter() for child in parent}
+
+
+def remove_element(parents: dict[ET.Element, ET.Element], element: ET.Element) -> None:
+    parent = parents.get(element)
     if parent is not None:
-        parent.remove(el)
+        try:
+            parent.remove(element)
+        except ValueError:
+            pass
 
 
-def text_from_specs(quote: dict, label: str, default: str = '') -> str:
-    for spec in quote.get('specs', []):
-        if spec.get('label') == label:
-            return str(spec.get('value') or default)
-    return default
+def rewrite_remaining_quote_model_markers(root: ET.Element) -> None:
+    source_marker = "{{stackng__Model__r.Name}}"
+    for paragraph in root.iter(W_P):
+        text_nodes = list(paragraph.iter(W_T))
+        if "".join(text_node.text or "" for text_node in text_nodes) == source_marker * 2:
+            text_nodes[0].text = "[[quote_page_vertical_model]]"
+            for text_node in text_nodes[1:]:
+                text_node.text = ""
+            continue
+        for text_node in text_nodes:
+            if text_node.text == source_marker:
+                text_node.text = "[[quote_page_vertical_model]]"
 
 
-def quote_model(quote: dict) -> dict:
-    year = text_from_specs(quote, 'Year of Make')
-    wifi = text_from_specs(quote, 'Wi-Fi')
-    owner_approval = text_from_specs(quote, 'Owners Approval')
-    catering = text_from_specs(quote, 'Catering')
-    cabin_crew = text_from_specs(quote, 'Cabin Crew')
-    pets = text_from_specs(quote, 'Pets')
-    smoking = text_from_specs(quote, 'Smoking')
-    safety = text_from_specs(quote, 'Safety Ratings')
-    inclusions = str(quote.get('inclusions') or '')
-    exclusions = str(quote.get('exclusions') or '')
-    return {
-        'option_number': str(quote.get('option_number') or ''),
-        'model_name': str(quote.get('model_name') or ''),
-        'model_category': str(quote.get('model_category') or text_from_specs(quote, 'Category', 'Category TBC')),
-        'seats': str(quote.get('seats') or text_from_specs(quote, 'Seating')),
-        'price': str(quote.get('price') or ''),
-        'baggage_capacity': text_from_specs(quote, 'Baggage Capacity', 'To be confirmed'),
-        'cabin_dimensions': text_from_specs(quote, 'Cabin Dimensions', 'To be confirmed'),
-        'seat_config': text_from_specs(quote, 'Seat Config'),
-        'year_of_make': year,
-        'refurbished_year': text_from_specs(quote, 'Refurbished'),
-        'wifi': wifi,
-        'owner_approval': owner_approval,
-        'catering': catering,
-        'cabin_crew': cabin_crew,
-        'pets': pets,
-        'smoking': smoking,
-        'safety_ratings': safety,
-        'has_year_of_make': bool(year),
-        'has_refurbished_year': bool(text_from_specs(quote, 'Refurbished')),
-        'has_wifi': bool(wifi),
-        'has_owner_approval': bool(owner_approval),
-        'has_catering': bool(catering),
-        'has_cabin_crew': bool(cabin_crew),
-        'has_pets': bool(pets),
-        'has_smoking': bool(smoking),
-        'has_safety_ratings': bool(safety),
-        'has_inclusions': bool(inclusions),
-        'inclusions': inclusions,
-        'has_exclusions': bool(exclusions),
-        'exclusions': exclusions,
-        'exterior_image': quote['exterior_image'],
-        'interior_image': quote['interior_image'],
-    }
+def split_vertical_rail_page_breaks(root: ET.Element) -> None:
+    parents = parent_map(root)
+    for paragraph in list(root.iter(W_P)):
+        if not any(
+            text_node.text == "[[quote_page_vertical_model]]"
+            for text_node in paragraph.iter(W_T)
+        ):
+            continue
+        if not any(True for _ in paragraph.iter(W_DRAWING)):
+            continue
+
+        ppr = paragraph.find(f"./{W_PPR}")
+        page_break = ppr.find(f"./{W_PAGE_BREAK_BEFORE}") if ppr is not None else None
+        if page_break is None:
+            continue
+
+        ppr.remove(page_break)
+        parent = parents.get(paragraph)
+        if parent is None:
+            continue
+
+        break_paragraph = ET.Element(W_P)
+        break_ppr = ET.SubElement(break_paragraph, W_PPR)
+        ET.SubElement(break_ppr, W_PAGE_BREAK_BEFORE)
+        parent.insert(list(parent).index(paragraph), break_paragraph)
 
 
-def build_model() -> dict:
-    clean = json.loads(SRC_DATA.read_text())
-    model = {
-        'trip_name': clean['trip_name'],
-        'trip_date_long': clean['trip_date_long'],
-        'trip_number': clean['trip_number'],
-        'generated_on': clean['generated_on'],
-        'passenger_count': clean['passenger_count'],
-        'pricing_note': clean['pricing_note'],
-        'route_city_names': clean['route_city_names'],
-        'route_airport_codes': clean['route_airport_codes'],
-        'never': False,
-        'segments': clean['segments'],
-        'quotes': [quote_model(q) for q in clean['quotes']],
-    }
-    for quote_index, quote in enumerate(model['quotes'], 1):
-        for key, value in quote.items():
-            if key.endswith('_image'):
-                continue
-            model[f'quote_{quote_index}_{key}'] = value
+def format_trip_date_long(value: str) -> str:
+    date = datetime.strptime(value, "%Y-%m-%d")
+    return f"{date.strftime('%A')} {date.day:02d}-{MONTHS[date.month - 1]}-{date.year}"
+
+
+def format_generated_on(value: str) -> str:
+    date = datetime.strptime(value, "%d-%b-%Y %H:%M:%S %z").astimezone(timezone.utc)
+    return f"{MONTHS[date.month - 1]} {date.day}, {date.year} {date.hour:02d}:{date.minute:02d}"
+
+
+def read_model() -> dict:
+    model = json.loads(SRC_DATA.read_text())
+    existing = json.loads(OUT_JSON.read_text()) if OUT_JSON.exists() else {}
+    existing_quotes = existing.get("stackng__FlightQuotes__r", [])
+
+    model["never"] = False
+    model["nutrient__TripDateLong__c"] = format_trip_date_long(
+        model["stackng__StartDateLocal__c"],
+    )
+    model["nutrient__GeneratedOn__c"] = format_generated_on(model["CurrentDateTime"])
+
+    for quote, existing_quote in zip(model.get("stackng__FlightQuotes__r", []), existing_quotes):
+        quote["nutrient__TripNumber__c"] = model["stackng__TripNumber__c"]
+        quote["nutrient__GeneratedOn__c"] = model["nutrient__GeneratedOn__c"]
+        quote["nutrient__ImageExterior"] = existing_quote.get("nutrient__ImageExterior")
+        quote["nutrient__ImageInterior"] = existing_quote.get("nutrient__ImageInterior")
+
     return model
 
 
-def apply_text_replacements(el: ET.Element, replacements: dict[str, str]) -> None:
-    for text_node in el.iter(W_T):
-        if not text_node.text:
-            continue
-        text = text_node.text
-        for old, new in replacements.items():
-            text = text.replace(old, new)
-        text_node.text = text
+INLINE_REPLACEMENTS = {
+    "{{$fromMillis($toMillis(stackng__StartDateLocal__c, \"[Y0001]-[M01]-[D01]\"), \"[FNn] [D01]-[MNn]-[Y0001]\")}}": "{{nutrient__TripDateLong__c}}",
+    "{% conditional-section expr(stackng__DepartTimeTBC__c = true) %}--:--{% end-section %}{% conditional-section expr(stackng__DepartTimeTBC__c = false) %}{{`stackng__DepartTimeLocal__c`}}{% end-section %}": "{{#stackng__DepartTimeTBC__c}}--:--{{/stackng__DepartTimeTBC__c}}{{^stackng__DepartTimeTBC__c}}{{stackng__DepartTimeLocal__c}}{{/stackng__DepartTimeTBC__c}}",
+    "{% conditional-section expr(stackng__DepartTimeTBC__c = true) %}--:--{% end-section %}{% conditional-section expr(stackng__DepartTimeTBC__c = false) %}{{`stackng__ArriveTimeLocal__c`}}{% end-section %}": "{{#stackng__ArriveTimeTBC__c}}--:--{{/stackng__ArriveTimeTBC__c}}{{^stackng__ArriveTimeTBC__c}}{{stackng__ArriveTimeLocal__c}}{{/stackng__ArriveTimeTBC__c}}",
+    "{{`stackng__FromCity__c`}}  - {{`stackng__FromCodes__c`}}": "{{stackng__FromCity__c}} - {{stackng__FromCodes__c}}",
+    "{{`stackng__From__r`.`stackng__LocalName__c`}}": "{{stackng__From__r.stackng__LocalName__c}}",
+    "{{`stackng__ToCity__c`}} - {{`stackng__ToCodes__c`}}": "{{stackng__ToCity__c}} - {{stackng__ToCodes__c}}",
+    "{{`stackng__To__r`.`stackng__LocalName__c`}}": "{{stackng__To__r.stackng__LocalName__c}}",
+    "{{`stackng__EBT_formula__c`}}": "{{stackng__EBT_formula__c}}",
+    "Option – {{index}}": "Option – {{index}} / {{stackng__Model__r.Name}}",
+    "Pricing based on {{ `stackng__PAXest__c`}} passengers": "Pricing based on {{stackng__PAXest__c}} passengers",
+    "*Pricing based on {{`stackng__PAXest__c`}} passengers on each segment.": "*Pricing based on {{stackng__PAXest__c}} passengers on each segment.",
+    "{{`stackng__Model__r`.Name}}{{`stackng__Model__r`.Name}}": "{{stackng__Model__r.Name}}",
+    "{{`stackng__Model__r`.Name}}": "{{stackng__Model__r.Name}}",
+    "({{`stackng__Model__r`.`stackng__Category__c`}})": "({{#stackng__Model__r.stackng__Category__c}}{{stackng__Model__r.stackng__Category__c}}{{/stackng__Model__r.stackng__Category__c}}{{^stackng__Model__r.stackng__Category__c}}Category TBC{{/stackng__Model__r.stackng__Category__c}})",
+    "{{stackng__Model__r.stackng__Category__c:default-val(Category TBC)}}": "{{#stackng__Model__r.stackng__Category__c}}{{stackng__Model__r.stackng__Category__c}}{{/stackng__Model__r.stackng__Category__c}}{{^stackng__Model__r.stackng__Category__c}}Category TBC{{/stackng__Model__r.stackng__Category__c}}",
+    "{{`stackng__Seats__c`}}": "{{stackng__Seats__c}}",
+    "{{`stackng__BaggageSummary__c`:default-val(“To be confirmed”)}}": "{{#stackng__BaggageSummary__c}}{{stackng__BaggageSummary__c}}{{/stackng__BaggageSummary__c}}{{^stackng__BaggageSummary__c}}To be confirmed{{/stackng__BaggageSummary__c}}",
+    "{{`stackng__CabinDimensions__c`:default-val(“To be confirmed”)}}  {{` stackng__SeatConfig__c`:default-val(“”)}}": "{{#stackng__CabinDimensions__c}}{{stackng__CabinDimensions__c}}{{/stackng__CabinDimensions__c}}{{^stackng__CabinDimensions__c}}To be confirmed{{/stackng__CabinDimensions__c}} {{stackng__SeatConfig__c}}",
+    "{{`stackng__YOM__c`}}": "{{stackng__YOM__c}}",
+    "Refurbished in {{`stackng__YOR__c`}}": "Refurbished in {{stackng__YOR__c}}",
+    "{{stackng__WiFi__c}}": "{{stackng__WiFi__c}}",
+    "{{`stackng__OwnerApproval__c`}}": "{{stackng__OwnerApproval__c}}",
+    "{{`stackng__CateringAvailable__c`}}": "{{stackng__CateringAvailable__c}}",
+    "{{`stackng__CabinCrew__c`}}": "{{stackng__CabinCrew__c}}",
+    "{{`stackng__PetsAllowed__c`}}": "{{stackng__PetsAllowed__c}}",
+    "{{`stackng__Smoking__c`}}": "{{stackng__Smoking__c}}",
+    "{{`stackng__Operator__r`.stackng__SafetyRatings__c}}": "{{stackng__Operator__r.stackng__SafetyRatings__c}}",
+}
 
+SECTION_STARTS = {
+    "{% repeating-section `stackng__FlightQuotes__r` %}": "stackng__FlightQuotes__r",
+    "{% conditional-section expr($length(stackng__YOM__c) > 0) %}": "stackng__YOM__c",
+    "{% conditional-section expr($length(stackng__YOR__c) > 0) %}": "stackng__YOR__c",
+    "{% conditional-section expr($length(stackng__WiFi__c) > 0) %}": "stackng__WiFi__c",
+    "{% conditional-section expr($length(stackng__OwnerApproval__c) > 0) %}": "stackng__OwnerApproval__c",
+    "{% conditional-section expr($length(stackng__CateringAvailable__c) > 0) %}": "stackng__CateringAvailable__c",
+    "{% conditional-section expr($length(stackng__CabinCrew__c) > 0) %}": "stackng__CabinCrew__c",
+    "{% conditional-section expr($length(stackng__PetsAllowed__c) > 0) %}": "stackng__PetsAllowed__c",
+    "{% conditional-section expr($length(stackng__Smoking__c) > 0) %}": "stackng__Smoking__c",
+    "{% conditional-section expr($length(`stackng__Operator__r`.stackng__SafetyRatings__c) > 0) %}": "stackng__Operator__r.stackng__SafetyRatings__c",
+    "{% conditional-section expr(stackng__renderInclusions__c = true) %}": "stackng__renderInclusions__c",
+    "{% conditional-section expr(stackng__renderExclusions__c = true) %}": "stackng__renderExclusions__c",
+    "{% conditional-section expr(true = false) %}": "never",
+}
 
-def find_body_child_index(children: list[ET.Element], needle: str, start: int = 0) -> int:
-    for index, child in enumerate(children[start:], start):
-        if element_text(child) == needle:
-            return index
-    raise RuntimeError(f'could not find body child: {needle}')
+TABLE_STARTS = {
+    "{% table-start `stackng__Segments__r` %}",
+    "{% table-start stackng__FlightQuotes__r %}",
+}
 
+STRING_CONDITIONAL_SECTIONS = {
+    "stackng__YOM__c",
+    "stackng__YOR__c",
+    "stackng__WiFi__c",
+    "stackng__OwnerApproval__c",
+    "stackng__CateringAvailable__c",
+    "stackng__CabinCrew__c",
+    "stackng__PetsAllowed__c",
+    "stackng__Smoking__c",
+    "stackng__Operator__r.stackng__SafetyRatings__c",
+}
 
-def quote_replacements(quote_index: int) -> dict[str, str]:
-    prefix = f'quote_{quote_index}_'
-    return {
-        'Quote Ref.: {{stackng__TripNumber__c}}': 'Quote Ref.: {{trip_number}}',
-        'Generated on March 2, 2026 07:50': 'Generated on {{generated_on}}',
-        '{{`stackng__Model__r`.Name}}': '{{' + prefix + 'model_name}}',
-        '{{`stackng__Model__r`.Name}}{{`stackng__Model__r`.Name}}': '{{' + prefix + 'model_name}}',
-        '({{`stackng__Model__r`.`stackng__Category__c`}})': '({{' + prefix + 'model_category}})',
-        'Option – {{index}}': 'Option – {{' + prefix + 'option_number}}',
-        '{{stackng__GrossPrice_SellCurrText__c}}': '{{' + prefix + 'price}}',
-        '{{stackng__Model__r.stackng__Category__c:default-val(Category TBC)}}': '{{' + prefix + 'model_category}}',
-        '{{`stackng__Seats__c`}}': '{{' + prefix + 'seats}}',
-        '{{`stackng__BaggageSummary__c`:default-val(“To be confirmed”)}}': '{{' + prefix + 'baggage_capacity}}',
-        '{{`stackng__CabinDimensions__c`:default-val(“To be confirmed”)}}  {{` stackng__SeatConfig__c`:default-val(“”)}}': '{{' + prefix + 'cabin_dimensions}} {{' + prefix + 'seat_config}}',
-        '{{`stackng__YOM__c`}}': '{{' + prefix + 'year_of_make}}',
-        'Refurbished in {{`stackng__YOR__c`}}': 'Refurbished in {{' + prefix + 'refurbished_year}}',
-        '{{stackng__WiFi__c}}': '{{' + prefix + 'wifi}}',
-        '{{`stackng__OwnerApproval__c`}}': '{{' + prefix + 'owner_approval}}',
-        '{{`stackng__CateringAvailable__c`}}': '{{' + prefix + 'catering}}',
-        '{{`stackng__CabinCrew__c`}}': '{{' + prefix + 'cabin_crew}}',
-        '{{`stackng__PetsAllowed__c`}}': '{{' + prefix + 'pets}}',
-        '{{`stackng__Smoking__c`}}': '{{' + prefix + 'smoking}}',
-        '{{`stackng__Operator__r`.stackng__SafetyRatings__c}}': '{{' + prefix + 'safety_ratings}}',
-        '{{stackng__Inclusions__c}}': '{{' + prefix + 'inclusions}}',
-        '{{stackng__Exclusions__c}}': '{{' + prefix + 'exclusions}}',
-    }
-
-
-QUOTE_CONDITIONALS = {
-    '{% conditional-section expr($length(stackng__YOM__c) > 0) %}': 'has_year_of_make',
-    '{% conditional-section expr($length(stackng__YOR__c) > 0) %}': 'has_refurbished_year',
-    '{% conditional-section expr($length(stackng__WiFi__c) > 0) %}': 'has_wifi',
-    '{% conditional-section expr($length(stackng__OwnerApproval__c) > 0) %}': 'has_owner_approval',
-    '{% conditional-section expr($length(stackng__CateringAvailable__c) > 0) %}': 'has_catering',
-    '{% conditional-section expr($length(stackng__CabinCrew__c) > 0) %}': 'has_cabin_crew',
-    '{% conditional-section expr($length(stackng__PetsAllowed__c) > 0) %}': 'has_pets',
-    '{% conditional-section expr($length(stackng__Smoking__c) > 0) %}': 'has_smoking',
-    '{% conditional-section expr($length(`stackng__Operator__r`.stackng__SafetyRatings__c) > 0) %}': 'has_safety_ratings',
-    '{% conditional-section expr(stackng__renderInclusions__c = true) %}': 'has_inclusions',
-    '{% conditional-section expr(stackng__renderExclusions__c = true) %}': 'has_exclusions',
+QUOTE_PAGE_REPLACEMENTS = {
+    "Category": "[[quote_page_category_label]]",
+    "{{stackng__Model__r.stackng__Category__c:default-val(Category TBC)}}": "[[quote_page_category_value]]",
+    "Seating": "[[quote_page_seating_label]]",
+    "{{`stackng__Seats__c`}}": "[[quote_page_seating_value]]",
+    "Year of Make": "[[quote_page_year_of_make_label]]",
+    "{{`stackng__YOM__c`}}": "[[quote_page_year_of_make_value]]",
+    "Refurbished in {{`stackng__YOR__c`}}": "[[quote_page_refurbished_value]]",
+    "Wi-Fi": "[[quote_page_wifi_label]]",
+    "{{stackng__WiFi__c}}": "[[quote_page_wifi_value]]",
+    "Owners Approval": "[[quote_page_owner_approval_label]]",
+    "{{`stackng__OwnerApproval__c`}}": "[[quote_page_owner_approval_value]]",
+    "Catering": "[[quote_page_catering_label]]",
+    "{{`stackng__CateringAvailable__c`}}": "[[quote_page_catering_value]]",
+    "Cabin Crew": "[[quote_page_cabin_crew_label]]",
+    "{{`stackng__CabinCrew__c`}}": "[[quote_page_cabin_crew_value]]",
+    "Pets": "[[quote_page_pets_label]]",
+    "{{`stackng__PetsAllowed__c`}}": "[[quote_page_pets_value]]",
+    "Smoking": "[[quote_page_smoking_label]]",
+    "{{`stackng__Smoking__c`}}": "[[quote_page_smoking_value]]",
+    "Safety Ratings": "[[quote_page_safety_ratings_label]]",
+    "{{`stackng__Operator__r`.stackng__SafetyRatings__c}}": "[[quote_page_safety_ratings_value]]",
 }
 
 
-def prune_quote_conditionals(block: list[ET.Element], quote: dict) -> None:
-    wrapper = ET.Element('wrapper')
-    for child in block:
-        wrapper.append(child)
-    parent_map = {child: parent for parent in wrapper.iter() for child in parent}
-    stack: list[bool] = []
-    for paragraph in list(wrapper.iter(W_P)):
-        text = element_text(paragraph)
-        if text in QUOTE_CONDITIONALS:
-            stack.append(bool(quote.get(QUOTE_CONDITIONALS[text])))
-            remove_element(parent_map, paragraph)
-            continue
-        if text == '{% end-section %}' and stack:
-            stack.pop()
-            remove_element(parent_map, paragraph)
-            continue
-        if stack and not all(stack):
-            remove_element(parent_map, paragraph)
-
-
-def normalize_quote_page_break(block: list[ET.Element]) -> None:
-    for index, child in enumerate(block):
-        page_break = child.find(f'.//{W_PAGE_BREAK_BEFORE}')
-        if page_break is None:
-            continue
-        parent_map = {node: parent for parent in child.iter() for node in parent}
-        remove_element(parent_map, page_break)
-        page_break_paragraph = ET.Element(W_P)
-        run = ET.SubElement(page_break_paragraph, W_R)
-        br = ET.SubElement(run, W_BR)
-        br.set(qn(W, 'type'), 'page')
-        block.insert(index, page_break_paragraph)
-        return
-
-
-def rewrite_quote_block(block: list[ET.Element], quote_index: int, quote: dict) -> None:
-    normalize_quote_page_break(block)
-    prune_quote_conditionals(block, quote)
-    replacements = quote_replacements(quote_index)
-    wrapper = ET.Element('wrapper')
-    for child in block:
-        wrapper.append(child)
-    for paragraph in list(wrapper.iter(W_P)):
-        text = para_text(paragraph)
-        if text in replacements:
-            set_para_text(paragraph, replacements[text])
-    apply_text_replacements(wrapper, replacements)
+def in_quote_loop(stack: list[str]) -> bool:
+    return "stackng__FlightQuotes__r" in stack
 
 
 def patch_template() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory() as tmp_name:
         tmp = Path(tmp_name)
-        with ZipFile(SRC_DOCX) as zin:
-            zin.extractall(tmp)
-        doc_xml = tmp / 'word' / 'document.xml'
+        with ZipFile(SRC_DOCX) as source_docx:
+            source_docx.extractall(tmp)
+
+        doc_xml = tmp / "word" / "document.xml"
         tree = ET.parse(doc_xml)
         root = tree.getroot()
-        model = build_model()
-        body = root.find(f'.//{W_BODY}')
+        body = root.find(f".//{W_BODY}")
         if body is None:
-            raise RuntimeError('document body not found')
+            raise RuntimeError("document body not found")
 
-        children = list(body)
-        repeat_start = find_body_child_index(children, '{% repeating-section `stackng__FlightQuotes__r` %}')
-        repeat_end = find_body_child_index(children, '{% end-section %}', repeat_start + 1)
-        quote_block_source = children[repeat_start + 1:repeat_end]
-        rebuilt_children = children[:repeat_start]
-        for quote_index, quote in enumerate(model['quotes'], 1):
-            quote_block = [deepcopy(child) for child in quote_block_source]
-            rewrite_quote_block(quote_block, quote_index, quote)
-            rebuilt_children.extend(quote_block)
-        rebuilt_children.extend(children[repeat_end + 1:])
-
-        body.clear()
-        for child in rebuilt_children:
-            body.append(child)
-
-        # Keep the original anchored picture placeholders. Nutrient image markers
-        # reflow when placed inline and are not substituted inside Word text boxes,
-        # so the app patches these image anchors in the populated DOCX before PDF conversion.
-        parent_map = {child: parent for parent in root.iter() for child in parent}
+        parents = parent_map(root)
         stack: list[str] = []
-        price_seen = 0
-        summary_index_done = False
-
-        replacements = {
-            '{{$fromMillis($toMillis(stackng__StartDateLocal__c, "[Y0001]-[M01]-[D01]"), "[FNn] [D01]-[MNn]-[Y0001]")}}': '{{trip_date_long}}',
-            'Quote Ref.: {{stackng__TripNumber__c}}': 'Quote Ref.: {{trip_number}}',
-            '{{stackng__DepartDay__c}} {{stackng__DepartDateLocal_text__c}}': '{{#segments}}{{segment_date}}',
-            '{% conditional-section expr(stackng__DepartTimeTBC__c = true) %}--:--{% end-section %}{% conditional-section expr(stackng__DepartTimeTBC__c = false) %}{{`stackng__DepartTimeLocal__c`}}{% end-section %}': '{{depart_time}}',
-            '{{`stackng__FromCity__c`}}  - {{`stackng__FromCodes__c`}}': '{{depart_route}}',
-            '{{`stackng__From__r`.`stackng__LocalName__c`}}': '{{depart_airport}}',
-            '{% conditional-section expr(stackng__DepartTimeTBC__c = true) %}--:--{% end-section %}{% conditional-section expr(stackng__DepartTimeTBC__c = false) %}{{`stackng__ArriveTimeLocal__c`}}{% end-section %}': '{{arrive_time}}',
-            '{{`stackng__ToCity__c`}} - {{`stackng__ToCodes__c`}}': '{{arrive_route}}',
-            '{{`stackng__To__r`.`stackng__LocalName__c`}}': '{{arrive_airport}}',
-            '{{`stackng__EBT_formula__c`}}': '{{flight_time}}{{/segments}}',
-            'Pricing based on {{ `stackng__PAXest__c`}} passengers': 'Pricing based on {{passenger_count}} passengers',
-            '*Pricing based on {{`stackng__PAXest__c`}} passengers on each segment.': '*Pricing based on {{passenger_count}} passengers on each segment.',
-            '{{`stackng__Model__r`.Name}}': '{{model_name}}',
-            '{{`stackng__Model__r`.Name}}{{`stackng__Model__r`.Name}}': '{{model_name}}',
-            '({{`stackng__Model__r`.`stackng__Category__c`}})': '({{model_category}})',
-            '{{`stackng__Seats__c`}}': '{{seats}}',
-            'Option – {{index}}': 'Option – {{option_number}}',
-            '{{stackng__Model__r.stackng__Category__c:default-val(Category TBC)}}': '{{model_category}}',
-            '{{`stackng__BaggageSummary__c`:default-val(“To be confirmed”)}}': '{{baggage_capacity}}',
-            '{{`stackng__CabinDimensions__c`:default-val(“To be confirmed”)}}  {{` stackng__SeatConfig__c`:default-val(“”)}}': '{{cabin_dimensions}} {{seat_config}}',
-            'Refurbished in {{`stackng__YOR__c`}}': 'Refurbished in {{refurbished_year}}',
-            '{{`stackng__YOM__c`}}': '{{year_of_make}}',
-            '{{stackng__WiFi__c}}': '{{wifi}}',
-            '{{`stackng__OwnerApproval__c`}}': '{{owner_approval}}',
-            '{{`stackng__CateringAvailable__c`}}': '{{catering}}',
-            '{{`stackng__CabinCrew__c`}}': '{{cabin_crew}}',
-            '{{`stackng__PetsAllowed__c`}}': '{{pets}}',
-            '{{`stackng__Smoking__c`}}': '{{smoking}}',
-            '{{`stackng__Operator__r`.stackng__SafetyRatings__c}}': '{{safety_ratings}}',
-            '{{stackng__Inclusions__c}}': '{{inclusions}}',
-            '{{stackng__Exclusions__c}}': '{{exclusions}}',
-            'Generated on March 2, 2026 07:50': 'Generated on {{generated_on}}',
-        }
-        conditional_starts = {
-            '{% conditional-section expr($length(stackng__YOM__c) > 0) %}': 'has_year_of_make',
-            '{% conditional-section expr($length(stackng__YOR__c) > 0) %}': 'has_refurbished_year',
-            '{% conditional-section expr($length(stackng__WiFi__c) > 0) %}': 'has_wifi',
-            '{% conditional-section expr($length(stackng__OwnerApproval__c) > 0) %}': 'has_owner_approval',
-            '{% conditional-section expr($length(stackng__CateringAvailable__c) > 0) %}': 'has_catering',
-            '{% conditional-section expr($length(stackng__CabinCrew__c) > 0) %}': 'has_cabin_crew',
-            '{% conditional-section expr($length(stackng__PetsAllowed__c) > 0) %}': 'has_pets',
-            '{% conditional-section expr($length(stackng__Smoking__c) > 0) %}': 'has_smoking',
-            '{% conditional-section expr($length(`stackng__Operator__r`.stackng__SafetyRatings__c) > 0) %}': 'has_safety_ratings',
-            '{% conditional-section expr(stackng__renderInclusions__c = true) %}': 'has_inclusions',
-            '{% conditional-section expr(stackng__renderExclusions__c = true) %}': 'has_exclusions',
-            '{% conditional-section expr(true = false) %}': 'never',
-        }
-
-        for p in list(root.iter(W_P)):
-            text = para_text(p)
+        summary_option_done = False
+        summary_model_done = False
+        summary_category_done = False
+        summary_seats_done = False
+        summary_price_done = False
+        for paragraph in list(root.iter(W_P)):
+            text = para_text(paragraph)
             if not text:
                 continue
-            if text in ('{% table-start `stackng__Segments__r` %}', '{% table-start stackng__FlightQuotes__r %}', '{% table-end %}'):
-                remove_element(parent_map, p)
+
+            if text in TABLE_STARTS or text == "{% table-end %}":
+                remove_element(parents, paragraph)
                 continue
-            if text == '{% repeating-section `stackng__FlightQuotes__r` %}':
-                remove_element(parent_map, p)
+
+            if text == "{{stackng__DepartDay__c}} {{stackng__DepartDateLocal_text__c}}":
+                set_para_text(paragraph, "[[segment_date]]")
                 continue
-            if text in conditional_starts:
-                name = conditional_starts[text]
-                set_para_text(p, '{{#' + name + '}}')
+
+            if text == "{% conditional-section expr(stackng__DepartTimeTBC__c = true) %}--:--{% end-section %}{% conditional-section expr(stackng__DepartTimeTBC__c = false) %}{{`stackng__DepartTimeLocal__c`}}{% end-section %}":
+                set_para_text(paragraph, "[[segment_depart_time]]")
+                continue
+
+            if text == "{{`stackng__FromCity__c`}}  - {{`stackng__FromCodes__c`}}":
+                set_para_text(paragraph, "[[segment_from_route]]")
+                continue
+
+            if text == "{{`stackng__From__r`.`stackng__LocalName__c`}}":
+                set_para_text(paragraph, "[[segment_from_airport]]")
+                continue
+
+            if text == "{% conditional-section expr(stackng__DepartTimeTBC__c = true) %}--:--{% end-section %}{% conditional-section expr(stackng__DepartTimeTBC__c = false) %}{{`stackng__ArriveTimeLocal__c`}}{% end-section %}":
+                set_para_text(paragraph, "[[segment_arrive_time]]")
+                continue
+
+            if text == "{{`stackng__ToCity__c`}} - {{`stackng__ToCodes__c`}}":
+                set_para_text(paragraph, "[[segment_to_route]]")
+                continue
+
+            if text == "{{`stackng__To__r`.`stackng__LocalName__c`}}":
+                set_para_text(paragraph, "[[segment_to_airport]]")
+                continue
+
+            if text == "{{`stackng__EBT_formula__c`}}":
+                set_para_text(paragraph, "[[segment_flight_time]]")
+                continue
+
+            if text == "{{index}}" and not summary_option_done:
+                set_para_text(paragraph, "[[quote_index]]")
+                summary_option_done = True
+                continue
+
+            if text == "{{`stackng__Model__r`.Name}}" and not stack and not summary_model_done:
+                set_para_text(paragraph, "[[quote_model_name]]")
+                summary_model_done = True
+                continue
+
+            if text == "({{`stackng__Model__r`.`stackng__Category__c`}})" and not stack and not summary_category_done:
+                set_para_text(paragraph, "([[quote_model_category]])")
+                summary_category_done = True
+                continue
+
+            if text == "{{`stackng__Seats__c`}}" and not stack and not summary_seats_done:
+                set_para_text(paragraph, "[[quote_seats]]")
+                summary_seats_done = True
+                continue
+
+            if text == "{{stackng__GrossPrice_SellCurrText__c}}" and not stack and not summary_price_done:
+                set_para_text(paragraph, "[[quote_price]]")
+                summary_price_done = True
+                continue
+
+            if text in QUOTE_PAGE_REPLACEMENTS and in_quote_loop(stack):
+                set_para_text(paragraph, QUOTE_PAGE_REPLACEMENTS[text])
+                continue
+
+            if text == "{{`stackng__BaggageSummary__c`:default-val(“To be confirmed”)}}" and stack:
+                set_para_text(paragraph, "[[quote_page_baggage_capacity]]")
+                continue
+
+            if text == "{{`stackng__CabinDimensions__c`:default-val(“To be confirmed”)}}  {{` stackng__SeatConfig__c`:default-val(“”)}}" and stack:
+                set_para_text(paragraph, "[[quote_page_cabin_dimensions]]")
+                continue
+
+            if text in SECTION_STARTS:
+                name = SECTION_STARTS[text]
+                if in_quote_loop(stack) and name in STRING_CONDITIONAL_SECTIONS:
+                    remove_element(parents, paragraph)
+                    stack.append(f"__removed__:{name}")
+                    continue
+                set_para_text(paragraph, "{{#" + name + "}}")
                 stack.append(name)
                 continue
-            if text == '{% end-section %}':
-                name = stack.pop() if stack else 'unused_section'
-                set_para_text(p, '{{/' + name + '}}')
+
+            if text == "{% end-section %}":
+                if not stack:
+                    raise RuntimeError(f"orphan section end near {text!r}")
+                name = stack.pop()
+                if name.startswith("__removed__:"):
+                    remove_element(parents, paragraph)
+                    continue
+                set_para_text(paragraph, "{{/" + name + "}}")
                 continue
-            if text == '{{index}}' and not summary_index_done:
-                set_para_text(p, '{{#quotes}}{{option_number}}')
-                summary_index_done = True
+
+            if text == "Generated on March 2, 2026 07:50":
+                field = "nutrient__GeneratedOn__c"
+                set_para_text(paragraph, "Generated on {{" + field + "}}")
                 continue
-            if text == '{{stackng__GrossPrice_SellCurrText__c}}':
-                price_seen += 1
-                set_para_text(p, '{{price}}{{/quotes}}' if price_seen == 1 else '{{price}}')
+
+            if text == "Quote Ref.: {{stackng__TripNumber__c}}":
+                field = (
+                    "nutrient__TripNumber__c"
+                    if "stackng__FlightQuotes__r" in stack
+                    else "stackng__TripNumber__c"
+                )
+                set_para_text(paragraph, "Quote Ref.: {{" + field + "}}")
                 continue
-            if text in replacements:
-                set_para_text(p, replacements[text])
+
+            if text in INLINE_REPLACEMENTS:
+                set_para_text(paragraph, INLINE_REPLACEMENTS[text])
 
         if stack:
-            raise RuntimeError(f'unclosed template stack: {stack}')
+            raise RuntimeError(f"unclosed template stack: {stack}")
 
-        ET.ElementTree(root).write(doc_xml, encoding='UTF-8', xml_declaration=True)
-        with ZipFile(OUT_DOCX, 'w', ZIP_DEFLATED) as zout:
-            for file in sorted(tmp.rglob('*')):
+        rewrite_remaining_quote_model_markers(root)
+        split_vertical_rail_page_breaks(root)
+        tree.write(doc_xml, encoding="UTF-8", xml_declaration=True)
+        with ZipFile(OUT_DOCX, "w", ZIP_DEFLATED) as output_docx:
+            for file in sorted(tmp.rglob("*")):
                 if file.is_file():
-                    zout.write(file, file.relative_to(tmp).as_posix())
+                    output_docx.write(file, file.relative_to(tmp).as_posix())
 
 
 def write_model() -> None:
-    model = build_model()
-    OUT_JSON.write_text(json.dumps(model, indent=2) + '\n')
+    OUT_JSON.write_text(json.dumps(read_model(), indent=2) + "\n")
 
 
 def write_readme() -> None:
-    (OUT_DIR / 'README.md').write_text(
-        '# Nutrient quote template adapted from original DOCX\n\n'
-        'This folder keeps the original `stackaero-quote-studiojazzy.docx` layout, embedded fonts, text boxes, and artwork. '
-        'The old template markers were rewritten to Nutrient Web SDK compatible placeholders.\n\n'
-        '- `stackaero-quote-template.docx` — original-based Nutrient DOCX template.\n'
-        '- `stackaero-quote-data.json` — flattened model passed to `populateDocumentTemplate()`.\n\n'
-        'The aircraft option pages are intentionally unrolled from the original repeating section. '
-        'This avoids Nutrient/Word floating-object drift with page-break text boxes and anchored aircraft images. '
-        'The app still uses Nutrient for template population and PDF conversion, then patches the preserved DOCX image anchors with base64 image bytes so browser CORS does not affect generation.\n\n'
-        'Nutrient placeholder names are intentionally simple (`letters`, `numbers`, `_`).\n'
+    (OUT_DIR / "README.md").write_text(
+        "# Nutrient quote template adapted from original DOCX\n\n"
+        "This folder keeps the original `stackaero-quote-studiojazzy.docx` layout and rewrites the old markers to Nutrient Web SDK template syntax.\n\n"
+        "- `stackaero-quote-template.docx` — original-based Nutrient DOCX template using direct nested loops over `stackng__Segments__r` and `stackng__FlightQuotes__r`.\n"
+        "- `stackaero-quote-data.json` — nested quote data in the old payload shape, with small `nutrient__*` helpers for formatted dates and base64 image payloads.\n\n"
+        "The app passes this JSON directly to `populateDocumentTemplate()`. A small post-population patch preserves legacy Word table rows and anchored aircraft image frames that live outside normal Nutrient template text.\n"
     )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     patch_template()
     write_model()
     write_readme()
-    print(f'wrote {OUT_DOCX}')
-    print(f'wrote {OUT_JSON}')
+    print(f"wrote {OUT_DOCX}")
+    print(f"wrote {OUT_JSON}")

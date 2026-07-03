@@ -19,20 +19,16 @@ export default function App() {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
 
-  const tripName = quoteData.trip_name;
+  const tripName = quoteData.stackng__TripName_formula__c;
 
   useEffect(() => {
-    console.log("[debug] effect mount, cancelled starts false");
     let cancelled = false;
     import("@nutrient-sdk/viewer").then(({ default: NutrientViewer }) => {
-      console.log("[debug] import resolved, cancelled=", cancelled);
       if (cancelled) return;
       nutrientRef.current = NutrientViewer;
-      console.log("[debug] nutrientRef.current set to", nutrientRef.current);
       setSdkReady(true);
     });
     return () => {
-      console.log("[debug] effect cleanup, marking cancelled");
       cancelled = true;
     };
   }, []);
@@ -55,7 +51,6 @@ export default function App() {
   }
 
   async function handlePreviewPdf() {
-    console.log("[debug] handlePreviewPdf called, nutrientRef.current=", nutrientRef.current);
     if (!nutrientRef.current) return;
     setBusy(true);
     setError(null);
@@ -87,7 +82,8 @@ export default function App() {
         <aside className="app__sidebar">
           <h2>{tripName}</h2>
           <p className="app__meta">
-            Trip #{quoteData.trip_number} &middot; {quoteData.route_city_names}
+            Trip #{quoteData.stackng__TripNumber__c} &middot;{" "}
+            {quoteData.stackng__RouteCityNames__c}
           </p>
 
           <button

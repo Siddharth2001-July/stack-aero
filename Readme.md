@@ -1,22 +1,24 @@
 # Stack Aero Quote Generation — Nutrient Migration
 
-This project now uses [Nutrient Web SDK](https://www.nutrient.io/guides/web/llms.txt) to populate a DOCX quote template and convert it to PDF. The migration keeps the old Word layout instead of recreating it from scratch.
+This project uses [Nutrient Web SDK](https://www.nutrient.io/guides/web/llms.txt) to populate the existing DOCX quote template and convert it to PDF. The sample is intentionally close to the old payload and template structure so the migration path is easy to see.
 
 ## Kept Assets
 
 - `assets/stackaero-quote-studiojazzy.docx` — original old-generation DOCX template.
 - `assets/stackaero-quote-outputresult.pdf` — original PDF target for visual comparison.
 - `assets/stackaero-quotejson-sample.json` — original sample quote data.
-- `assets/nutrient-quote-original-adapted/stackaero-quote-template.docx` — Nutrient-ready DOCX adapted from the original.
-- `assets/nutrient-quote-original-adapted/stackaero-quote-data.json` — flattened Nutrient model.
+- `assets/nutrient-quote-original-adapted/stackaero-quote-template.docx` — original DOCX rewritten with Nutrient template markers.
+- `assets/nutrient-quote-original-adapted/stackaero-quote-data.json` — nested old-style quote data, with small `nutrient__*` helpers for formatted dates and base64 image payloads.
 
 ## Main Structural Changes
 
-- **Template fields:** Old expressions such as ``{{`stackng__Model__r`.Name}}`` are replaced with simple Nutrient placeholders like `{{quote_1_model_name}}`. Nutrient placeholder names should use letters, numbers, and underscores only.
-- **Data shape:** Nested old-generation/Salesforce-style data is flattened before template population, so the DOCX does not need to evaluate expressions or object paths.
-- **Option pages:** Aircraft option pages are unrolled into `quote_1_*`, `quote_2_*`, etc. This avoids layout drift from repeating Word sections that contain vertical rails, anchored images, text boxes, and page breaks.
-- **Images:** Remote image URLs are converted to base64/data payloads to avoid browser CORS failures. The original DOCX image anchors are preserved and patched during generation.
-- **Runtime flow:** `src/lib/generateQuote.js` calls `NutrientViewer.populateDocumentTemplate()`, applies small DOCX anchor/text-box fixes, then calls `NutrientViewer.convertToPDF()`.
+- **Template syntax:** Old markers are rewritten to Nutrient placeholders, loops, inverse sections, and object paths such as `{{stackng__Model__r.Name}}`.
+- **Nested data:** The app passes `stackaero-quote-data.json` directly as the Nutrient `model`; there is no runtime quote-model adapter.
+- **Repeating sections:** `stackng__Segments__r` and `stackng__FlightQuotes__r` stay as arrays and are rendered with `{{#...}}` / `{{/...}}` loops in the DOCX.
+- **Legacy Word objects:** The original template keeps a few table-row/image placeholders outside normal Nutrient text flow. `src/lib/generateQuote.js` patches those preserved Word structures after Nutrient population.
+- **Option headings:** Aircraft model names are shown in the option heading and preserved in the original vertical model rail.
+- **Images:** Remote aircraft URLs are represented as base64 image payloads to avoid browser CORS failures while keeping the original anchored image frames.
+- **Runtime flow:** `src/lib/generateQuote.js` loads the DOCX, calls `populateDocumentTemplate()`, applies the legacy Word-object patch, then converts to PDF.
 
 ## Nutrient References
 

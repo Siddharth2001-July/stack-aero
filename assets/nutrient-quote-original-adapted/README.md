@@ -1,10 +1,8 @@
 # Nutrient quote template adapted from original DOCX
 
-This folder keeps the original `stackaero-quote-studiojazzy.docx` layout, embedded fonts, text boxes, and artwork. The old template markers were rewritten to Nutrient Web SDK compatible placeholders.
+This folder keeps the original `stackaero-quote-studiojazzy.docx` layout and rewrites the old markers to Nutrient Web SDK template syntax.
 
-- `stackaero-quote-template.docx` — original-based Nutrient DOCX template.
-- `stackaero-quote-data.json` — flattened model passed to `populateDocumentTemplate()`.
+- `stackaero-quote-template.docx` — original-based Nutrient DOCX template using direct nested loops over `stackng__Segments__r` and `stackng__FlightQuotes__r`.
+- `stackaero-quote-data.json` — nested quote data in the old payload shape, with small `nutrient__*` helpers for formatted dates and base64 image payloads.
 
-The aircraft option pages are intentionally unrolled from the original repeating section. This avoids Nutrient/Word floating-object drift with page-break text boxes and anchored aircraft images. The app still uses Nutrient for template population and PDF conversion, then patches the preserved DOCX image anchors with base64 image bytes so browser CORS does not affect generation.
-
-Nutrient placeholder names are intentionally simple (`letters`, `numbers`, `_`).
+The app passes this JSON directly to `populateDocumentTemplate()`. A small post-population patch preserves legacy Word table rows and anchored aircraft image frames that live outside normal Nutrient template text.
